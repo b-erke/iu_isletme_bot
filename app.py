@@ -7,32 +7,6 @@ from pathlib import Path
 import subprocess
 import sys
 
-BASE_DIR = Path(__file__).resolve().parent
-INDEX_DIR = BASE_DIR / "index"
-
-VEC_PATH = INDEX_DIR / "tfidf_vectorizer.pkl"
-MAT_PATH = INDEX_DIR / "tfidf_matrix.pkl"
-META_PATH = INDEX_DIR / "metadata.pkl"
-
-def ensure_index():
-    if VEC_PATH.exists() and MAT_PATH.exists() and META_PATH.exists():
-        return
-
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Cloud’da doğru python: sys.executable
-    cmd = [sys.executable, "scripts/build_index_tfidf.py"]
-
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    if p.returncode != 0:
-        # Streamlit redaction yüzünden, hatayı kendimiz ekrana basalım:
-        raise RuntimeError(
-            "Index build failed!\n\n"
-            f"STDOUT:\n{p.stdout}\n\n"
-            f"STDERR:\n{p.stderr}\n"
-        )
-
-ensure_index()
 
 # Optional: OpenAI (kota biterse app yine TF-IDF ile çalışsın)
 try:
