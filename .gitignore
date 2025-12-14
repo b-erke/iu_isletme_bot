@@ -2,6 +2,3 @@
 .env
 __pycache__/
 *.pyc
-
-# index artifacts (cloud'da yeniden build edilecek)
-index/
