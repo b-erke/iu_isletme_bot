@@ -1,6 +1,5 @@
 .venv/
 .env
-index/
 *.pkl
 __pycache__/
 .DS_Store
