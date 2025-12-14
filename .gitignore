@@ -1,5 +1,7 @@
 .venv/
 .env
-*.pkl
 __pycache__/
-.DS_Store
+*.pyc
+
+# index artifacts (cloud'da yeniden build edilecek)
+index/
