@@ -15,3 +15,10 @@ index/
 
 # streamlit
 .streamlit/
+# env
+.venv/
+.env
+
+# index artifacts
+index/
+*.pkl
