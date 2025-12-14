@@ -3,8 +3,8 @@ import pickle
 import streamlit as st
 from dotenv import load_dotenv
 from sklearn.metrics.pairwise import cosine_similarity
-
 from pathlib import Path
+import subprocess
 
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_DIR = BASE_DIR / "index"
@@ -13,20 +13,15 @@ VEC_PATH = INDEX_DIR / "tfidf_vectorizer.pkl"
 MAT_PATH = INDEX_DIR / "tfidf_matrix.pkl"
 META_PATH = INDEX_DIR / "metadata.pkl"
 
-if not VEC_PATH.exists():
-    raise FileNotFoundError(
-        f"Index bulunamadı: {VEC_PATH}\n"
-        "Önce repo kökünde `python scripts/build_index_tfidf.py` çalıştır."
-    )
+def ensure_index():
+    if not VEC_PATH.exists():
+        print("🔧 Index bulunamadı, yeniden oluşturuluyor...")
+        subprocess.run(
+            ["python", "scripts/build_index_tfidf.py"],
+            check=True
+        )
 
-with open(VEC_PATH, "rb") as f:
-    vectorizer = pickle.load(f)
-
-with open(MAT_PATH, "rb") as f:
-    tfidf_matrix = pickle.load(f)
-
-with open(META_PATH, "rb") as f:
-    metadata = pickle.load(f)
+ensure_index()
 
 # Optional: OpenAI (kota biterse app yine TF-IDF ile çalışsın)
 try:
