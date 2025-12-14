@@ -1,185 +1,133 @@
 import os
 import pickle
-import streamlit as st
-from dotenv import load_dotenv
-from sklearn.metrics.pairwise import cosine_similarity
 from pathlib import Path
-import subprocess
-import sys
 
+import streamlit as st
+from openai import OpenAI
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Optional: OpenAI (kota biterse app yine TF-IDF ile çalışsın)
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
+INDEX_DIR = Path("index")
 
-load_dotenv()
+MODEL = "gpt-4o-mini"
+TOP_K = 5
+MAX_TOKENS = 220
 
-APP_TITLE = "İÜ İşletme Bot (TF-IDF + GPT)"
-INDEX_DIR = "index"
+def build_index_if_missing():
+    needed = [
+        INDEX_DIR / "tfidf_vectorizer.pkl",
+        INDEX_DIR / "tfidf_matrix.pkl",
+        INDEX_DIR / "metadata.pkl",
+    ]
+    if all(p.exists() for p in needed):
+        return
 
+    # build fonksiyonunu direkt import edip çalıştır
+    from scripts.build_index_tfidf import main as build_main
+    build_main()
+
+@st.cache_resource
 def load_index():
-    with open(os.path.join(INDEX_DIR, "tfidf_vectorizer.pkl"), "rb") as f:
+    with open(INDEX_DIR / "tfidf_vectorizer.pkl", "rb") as f:
         vectorizer = pickle.load(f)
-    with open(os.path.join(INDEX_DIR, "tfidf_matrix.pkl"), "rb") as f:
+    with open(INDEX_DIR / "tfidf_matrix.pkl", "rb") as f:
         tfidf_matrix = pickle.load(f)
-    with open(os.path.join(INDEX_DIR, "metadata.pkl"), "rb") as f:
+    with open(INDEX_DIR / "metadata.pkl", "rb") as f:
         metadata = pickle.load(f)
     return vectorizer, tfidf_matrix, metadata
 
-def tfidf_search(query, vectorizer, tfidf_matrix, metadata, top_k=5, min_sim=0.0):
+def retrieve(query, vectorizer, tfidf_matrix, metadata, top_k=TOP_K):
     q_vec = vectorizer.transform([query])
     sims = cosine_similarity(q_vec, tfidf_matrix)[0]
-    idx = sims.argsort()[::-1]
+    top_idx = sims.argsort()[-top_k:][::-1]
 
-    results = []
-    for i in idx[:top_k]:
-        score = float(sims[i])
-        if score < min_sim:
-            continue
+    chunks = []
+    sources = []
+    for i in top_idx:
         m = metadata[i]
-        results.append({
-            "score": score,
-            "source": m.get("source", ""),
-            "page": m.get("page", None),
-            "text": m.get("text", "")  # build_index_tfidf.py bunu doldurmalı
-        })
-    return results
+        chunks.append(f"[{m['source']} | sayfa {m['page']}] {m.get('text','')}")
+        sources.append((m["source"], m["page"]))
+    return chunks, sources
 
-def format_sources(results):
-    lines = []
-    for r in results:
-        p = f"sayfa {r['page']}" if r["page"] is not None else "sayfa ?"
-        lines.append(f"- **{r['source']}** | {p} | skor={r['score']:.3f}")
-    return "\n".join(lines) if lines else "_Kaynak bulunamadı._"
+def get_api_key():
+    # Streamlit Cloud -> Secrets
+    if "OPENAI_API_KEY" in st.secrets:
+        return st.secrets["OPENAI_API_KEY"]
+    # local -> env
+    return os.getenv("OPENAI_API_KEY", "")
 
-def build_prompt(user_q, contexts):
-    # contextleri kısa tut (bütçe!)
-    ctx_blocks = []
-    for c in contexts[:5]:
-        txt = (c.get("text") or "").strip()
-        if not txt:
-            continue
-        # aşırı uzamasın
-        if len(txt) > 1200:
-            txt = txt[:1200] + "..."
-        ctx_blocks.append(f"[KAYNAK: {c['source']} | sayfa {c['page']}]\n{txt}")
-
-    ctx = "\n\n".join(ctx_blocks) if ctx_blocks else "Yeterli kaynak metni yok."
-
-    return f"""
-Sen İstanbul Üniversitesi İşletme Fakültesi yönergeleri/yönetmelikleri hakkında soru cevaplayan bir asistansın.
-Sadece verilen kaynak metnine dayan. Uydurma yapma.
-Cevabı Türkçe yaz, kısa ve net yaz.
-Cevabın sonunda 'Kaynaklar' başlığı altında hangi PDF/TXT ve sayfa kullanıldığını madde madde belirt.
-
-KULLANILABİLİR KAYNAK METİNLER:
-{ctx}
-
-SORU:
-{user_q}
-""".strip()
-
-def stream_openai_answer(prompt):
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    max_out = int(os.getenv("MAX_OUTPUT_TOKENS", "280"))
-
-    if not api_key or OpenAI is None:
-        raise RuntimeError("OPENAI_API_KEY yok ya da openai paketi yok.")
-
+def ask_gpt(query, context_chunks, api_key):
     client = OpenAI(api_key=api_key)
+    context = "\n\n".join(context_chunks[:TOP_K])
 
-    # Chat Completions streaming
-    stream = client.chat.completions.create(
-        model=model,
+    prompt = f"""Sen İstanbul Üniversitesi İşletme Fakültesi mevzuat/SSS dokümanlarına göre cevap veren bir asistansın.
+Cevabı Türkçe yaz. Eğer bağlamda cevap yoksa “Bu dokümanlarda net bir madde bulamadım” de.
+
+Soru: {query}
+
+Bağlam:
+{context}
+"""
+    resp = client.chat.completions.create(
+        model=MODEL,
         messages=[
-            {"role": "system", "content": "Kaynaklara dayalı, uydurmayan bir yardımcı ol."},
+            {"role": "system", "content": "Kısa, net, kaynak referanslı cevap ver."},
             {"role": "user", "content": prompt},
         ],
+        max_tokens=MAX_TOKENS,
         temperature=0.2,
-        max_tokens=max_out,
-        stream=True,
     )
+    return resp.choices[0].message.content.strip()
 
-    for event in stream:
-        delta = event.choices[0].delta.content
-        if delta:
-            yield delta
-
-# ---------------- UI ----------------
-st.set_page_config(page_title=APP_TITLE, page_icon="🎓", layout="centered")
+st.set_page_config(page_title="İÜ İşletme Bot", page_icon="🎓", layout="centered")
 st.title("🎓 İÜ İşletme Bot")
-st.caption("TF-IDF ile kaynak bulur; istersen GPT ile cevap üretir (kota biterse sadece TF-IDF çalışır).")
+st.caption("TF-IDF retrieval + GPT (ucuz mod). Kaynak sayfa bilgisiyle cevaplar.")
 
-# Sidebar controls
+# index garanti
+try:
+    build_index_if_missing()
+except Exception as e:
+    st.error(f"Index build edilemedi: {e}")
+    st.stop()
+
+vectorizer, tfidf_matrix, metadata = load_index()
+
+api_key = get_api_key()
+gpt_enabled = bool(api_key)
+
 with st.sidebar:
-    st.header("Ayarlar")
-    use_gpt = st.toggle("GPT ile cevap üret", value=True)
-    top_k = st.slider("Top-K kaynak", 1, 10, int(os.getenv("TOP_K", "5")))
-    min_sim = st.slider("Min benzerlik eşiği", 0.0, 0.30, float(os.getenv("MIN_SIM", "0.08")))
-    st.markdown("---")
-    st.write("**Not:** API key’i repoya koyma. Streamlit Cloud’da Secrets kullan.")
-
-# Load index once
-if "index_loaded" not in st.session_state:
-    try:
-        st.session_state.vectorizer, st.session_state.tfidf_matrix, st.session_state.metadata = load_index()
-        st.session_state.index_loaded = True
-    except Exception as e:
-        st.session_state.index_loaded = False
-        st.error(f"Index bulunamadı. Önce `python scripts/build_index_tfidf.py` çalıştır. Hata: {e}")
+    st.subheader("Ayarlar")
+    st.write(f"GPT aktif: {'✅' if gpt_enabled else '❌'}")
+    st.write("GPT kapalıysa sadece ilgili parçaları gösteririm.")
+    st.write(f"Model: {MODEL}")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Render chat history
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
 
-user_q = st.chat_input("Sorunu yaz (örn: Mazeret sınavı hangi maddeye göre yapılır?)")
-
-if user_q and st.session_state.index_loaded:
-    st.session_state.messages.append({"role": "user", "content": user_q})
+q = st.chat_input("Sorunu yaz…")
+if q:
+    st.session_state.messages.append({"role": "user", "content": q})
     with st.chat_message("user"):
-        st.markdown(user_q)
+        st.markdown(q)
 
-    # Retrieve
-    results = tfidf_search(
-        user_q,
-        st.session_state.vectorizer,
-        st.session_state.tfidf_matrix,
-        st.session_state.metadata,
-        top_k=top_k,
-        min_sim=min_sim,
-    )
+    chunks, sources = retrieve(q, vectorizer, tfidf_matrix, metadata)
 
-    # Always show sources
     with st.chat_message("assistant"):
-        st.markdown("### 📌 Bulunan Kaynaklar")
-        st.markdown(format_sources(results))
-
-    # GPT answer (optional)
-    if use_gpt:
-        prompt = build_prompt(user_q, results)
-
-        with st.chat_message("assistant"):
-            st.markdown("### 🤖 Cevap")
-            placeholder = st.empty()
-            acc = ""
-
+        if gpt_enabled:
             try:
-                for token in stream_openai_answer(prompt):
-                    acc += token
-                    placeholder.markdown(acc)
+                ans = ask_gpt(q, chunks, api_key)
+                st.markdown(ans)
             except Exception as e:
-                # Kota bitti / key yok / vs.
-                st.warning(f"GPT çağrısı başarısız (muhtemelen kota/anahtar). TF-IDF kaynakları üstte. Hata: {e}")
+                st.warning(f"GPT çağrısı başarısız: {e}")
+                st.markdown("İlgili doküman parçalarını aşağıya bırakıyorum:")
 
-            if acc.strip():
-                st.session_state.messages.append({"role": "assistant", "content": acc})
-    else:
-        with st.chat_message("assistant"):
-            st.info("GPT kapalı. Yalnızca kaynaklar gösterildi.")
+        st.markdown("**Kaynak parçalar:**")
+        for (src, pg), ch in zip(sources, chunks):
+            with st.expander(f"{src} | sayfa {pg}"):
+                st.write(ch)
+
+    # assistant mesajı olarak kaydet (gpt yoksa retrieval özetini kaydet)
+    st.session_state.messages.append({"role": "assistant", "content": "Cevap üretildi (aşağıda kaynaklar var)."})
