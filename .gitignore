@@ -1,0 +1,17 @@
+# env
+.venv/
+.env
+
+# python
+__pycache__/
+*.pyc
+
+# index artifacts
+index/
+*.pkl
+
+# mac
+.DS_Store
+
+# streamlit
+.streamlit/
