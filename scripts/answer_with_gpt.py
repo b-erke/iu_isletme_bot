@@ -1,82 +1,69 @@
 import os
-import pickle
-from pathlib import Path
-from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
 
-INDEX_DIR = Path("index")
+from scripts.retrieve_tfidf import search
 
-MODEL = "gpt-4o-mini"   # ucuz
-MAX_TOKENS = 220        # kısa tut
-TOP_K = 5
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # düşük maliyet için
+client = OpenAI()
 
-def load_index():
-    with open(INDEX_DIR / "tfidf_vectorizer.pkl", "rb") as f:
-        vectorizer = pickle.load(f)
-    with open(INDEX_DIR / "tfidf_matrix.pkl", "rb") as f:
-        tfidf_matrix = pickle.load(f)
-    with open(INDEX_DIR / "metadata.pkl", "rb") as f:
-        metadata = pickle.load(f)
-    return vectorizer, tfidf_matrix, metadata
 
-def retrieve(query, vectorizer, tfidf_matrix, metadata, top_k=TOP_K):
-    q_vec = vectorizer.transform([query])
-    sims = cosine_similarity(q_vec, tfidf_matrix)[0]
-    top_idx = sims.argsort()[-top_k:][::-1]
+def build_context(results, max_chars=6000):
+    parts = []
+    total = 0
+    for r in results:
+        header = f"[KAYNAK: {r['source']} | sayfa {r['page']} | skor {r['score']:.4f}]\n"
+        body = (r.get("text") or "").strip()
+        chunk = header + body + "\n\n"
+        if total + len(chunk) > max_chars:
+            break
+        parts.append(chunk)
+        total += len(chunk)
+    return "".join(parts).strip()
 
-    chunks = []
-    sources = []
-    for i in top_idx:
-        m = metadata[i]
-        chunks.append(f"[{m['source']} | sayfa {m['page']}] {m.get('text','')}")
-        sources.append({"source": m["source"], "page": m["page"]})
-    return chunks, sources
 
-def answer_with_gpt(query, context_chunks):
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY ortam değişkeni yok.")
+def answer(question: str):
+    results = search(question, top_k=5)
+    context = build_context(results)
 
-    client = OpenAI(api_key=api_key)
-
-    context = "\n\n".join(context_chunks[:TOP_K])
-
-    prompt = f"""Sen İstanbul Üniversitesi İşletme Fakültesi mevzuat/SSS dokümanlarına göre cevap veren bir asistansın.
-Cevabı Türkçe yaz. Eğer bağlamda cevap yoksa “Bu dokümanlarda net bir madde bulamadım” de ve en yakın ilgili parçayı söyle.
-
-Soru: {query}
-
-Bağlam:
-{context}
-"""
-
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "Kısa, net, kaynak referanslı cevap ver."},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=MAX_TOKENS,
-        temperature=0.2,
+    system = (
+        "Sen İstanbul Üniversitesi İşletme Fakültesi için doküman tabanlı bir asistan botsun. "
+        "Sadece verilen bağlamdan cevap ver. Bağlamda yoksa 'Bu dokümanlarda net bir madde bulamadım.' de. "
+        "Cevapta mümkünse madde numarası/sayfa belirt."
     )
-    return resp.choices[0].message.content.strip()
+
+    user = f"SORU: {question}\n\nBAĞLAM:\n{context if context else '(boş)'}"
+
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.1,
+        )
+        text = resp.choices[0].message.content.strip()
+
+    except Exception as e:
+        # ✅ quota / rate limit vs. olursa GPT olmadan geri dön
+        text = (
+            "Şu an GPT çağrısı yapılamadı (kota/bağlantı hatası olabilir). "
+            "Aşağıda dokümanlardan en yakın eşleşen parçaları veriyorum:\n\n"
+        )
+        for r in results[:3]:
+            text += f"- {r['source']} (sayfa {r['page']}), skor={r['score']:.4f}\n  {r['text'][:400].replace(chr(10),' ')}\n\n"
+
+    return text, results
+
 
 def main():
-    vectorizer, tfidf_matrix, metadata = load_index()
-
     while True:
         q = input("\nSoru (çıkmak için boş): ").strip()
         if not q:
             break
+        ans, sources = answer(q)
+        print("\n" + ans)
 
-        chunks, sources = retrieve(q, vectorizer, tfidf_matrix, metadata)
-        ans = answer_with_gpt(q, chunks)
-
-        print("\n=== CEVAP ===")
-        print(ans)
-        print("\n=== KAYNAKLAR ===")
-        for s in sources:
-            print(f"- {s['source']} | sayfa {s['page']}")
 
 if __name__ == "__main__":
     main()
