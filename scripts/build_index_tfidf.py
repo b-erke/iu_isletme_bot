@@ -1,133 +1,107 @@
-import os
+# scripts/build_index_tfidf.py
 import pickle
 from pathlib import Path
 
-import streamlit as st
-from openai import OpenAI
-from sklearn.metrics.pairwise import cosine_similarity
+from pypdf import PdfReader
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-INDEX_DIR = Path("index")
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT_DIR / "data"
+OUT_DIR = ROOT_DIR / "index"
 
-MODEL = "gpt-4o-mini"
-TOP_K = 5
-MAX_TOKENS = 220
+CHUNK_SIZE = 1200
+CHUNK_OVERLAP = 150
 
-def build_index_if_missing():
-    needed = [
-        INDEX_DIR / "tfidf_vectorizer.pkl",
-        INDEX_DIR / "tfidf_matrix.pkl",
-        INDEX_DIR / "metadata.pkl",
-    ]
-    if all(p.exists() for p in needed):
-        return
 
-    # build fonksiyonunu direkt import edip çalıştır
-    from scripts.build_index_tfidf import main as build_main
-    build_main()
-
-@st.cache_resource
-def load_index():
-    with open(INDEX_DIR / "tfidf_vectorizer.pkl", "rb") as f:
-        vectorizer = pickle.load(f)
-    with open(INDEX_DIR / "tfidf_matrix.pkl", "rb") as f:
-        tfidf_matrix = pickle.load(f)
-    with open(INDEX_DIR / "metadata.pkl", "rb") as f:
-        metadata = pickle.load(f)
-    return vectorizer, tfidf_matrix, metadata
-
-def retrieve(query, vectorizer, tfidf_matrix, metadata, top_k=TOP_K):
-    q_vec = vectorizer.transform([query])
-    sims = cosine_similarity(q_vec, tfidf_matrix)[0]
-    top_idx = sims.argsort()[-top_k:][::-1]
-
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
+    text = " ".join((text or "").split())
+    if not text:
+        return []
     chunks = []
-    sources = []
-    for i in top_idx:
-        m = metadata[i]
-        chunks.append(f"[{m['source']} | sayfa {m['page']}] {m.get('text','')}")
-        sources.append((m["source"], m["page"]))
-    return chunks, sources
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_size, n)
+        chunks.append(text[start:end])
+        if end == n:
+            break
+        start = max(0, end - overlap)
+    return chunks
 
-def get_api_key():
-    # Streamlit Cloud -> Secrets
-    if "OPENAI_API_KEY" in st.secrets:
-        return st.secrets["OPENAI_API_KEY"]
-    # local -> env
-    return os.getenv("OPENAI_API_KEY", "")
 
-def ask_gpt(query, context_chunks, api_key):
-    client = OpenAI(api_key=api_key)
-    context = "\n\n".join(context_chunks[:TOP_K])
+def read_pdf(path: Path):
+    reader = PdfReader(str(path))
+    out = []
+    for i, page in enumerate(reader.pages):
+        t = (page.extract_text() or "").strip()
+        if t:
+            out.append((t, i + 1))
+    return out
 
-    prompt = f"""Sen İstanbul Üniversitesi İşletme Fakültesi mevzuat/SSS dokümanlarına göre cevap veren bir asistansın.
-Cevabı Türkçe yaz. Eğer bağlamda cevap yoksa “Bu dokümanlarda net bir madde bulamadım” de.
 
-Soru: {query}
+def read_txt(path: Path):
+    t = path.read_text(encoding="utf-8", errors="ignore").strip()
+    return [(t, 1)] if t else []
 
-Bağlam:
-{context}
-"""
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "Kısa, net, kaynak referanslı cevap ver."},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=MAX_TOKENS,
-        temperature=0.2,
+
+def iter_documents():
+    if not DATA_DIR.exists():
+        raise FileNotFoundError(f"'{DATA_DIR}' yok. data/ içine pdf veya txt koy.")
+
+    for p in DATA_DIR.rglob("*"):
+        if p.is_dir() or p.name.startswith("."):
+            continue
+
+        ext = p.suffix.lower()
+        if ext == ".pdf":
+            for page_text, page_no in read_pdf(p):
+                yield {"source": str(p.relative_to(DATA_DIR)), "page": page_no, "text": page_text}
+        elif ext in [".txt", ".md"]:
+            for page_text, page_no in read_txt(p):
+                yield {"source": str(p.relative_to(DATA_DIR)), "page": page_no, "text": page_text}
+
+
+def build_index():
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    docs = list(iter_documents())
+    chunks = []
+    corpus = []
+
+    for d in docs:
+        parts = chunk_text(d["text"])
+        for idx, part in enumerate(parts):
+            chunks.append(
+                {
+                    "source": d["source"],
+                    "page": d["page"],
+                    "chunk_id": idx,
+                    "text": part,
+                }
+            )
+            corpus.append(part)
+
+    if not corpus:
+        raise RuntimeError("Hiç içerik bulunamadı. data/ içine pdf/txt koyduğuna emin ol.")
+
+    vectorizer = TfidfVectorizer(
+        lowercase=True,
+        max_features=50000,
+        ngram_range=(1, 2),
+        stop_words=None,
     )
-    return resp.choices[0].message.content.strip()
+    X = vectorizer.fit_transform(corpus)
 
-st.set_page_config(page_title="İÜ İşletme Bot", page_icon="🎓", layout="centered")
-st.title("🎓 İÜ İşletme Bot")
-st.caption("TF-IDF retrieval + GPT (ucuz mod). Kaynak sayfa bilgisiyle cevaplar.")
+    with open(OUT_DIR / "tfidf_matrix.pkl", "wb") as f:
+        pickle.dump(X, f)
+    with open(OUT_DIR / "tfidf_vectorizer.pkl", "wb") as f:
+        pickle.dump(vectorizer, f)
+    with open(OUT_DIR / "metadata.pkl", "wb") as f:
+        pickle.dump(chunks, f)
 
-# index garanti
-try:
-    build_index_if_missing()
-except Exception as e:
-    st.error(f"Index build edilemedi: {e}")
-    st.stop()
+    return len(chunks)
 
-vectorizer, tfidf_matrix, metadata = load_index()
 
-api_key = get_api_key()
-gpt_enabled = bool(api_key)
-
-with st.sidebar:
-    st.subheader("Ayarlar")
-    st.write(f"GPT aktif: {'✅' if gpt_enabled else '❌'}")
-    st.write("GPT kapalıysa sadece ilgili parçaları gösteririm.")
-    st.write(f"Model: {MODEL}")
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
-
-q = st.chat_input("Sorunu yaz…")
-if q:
-    st.session_state.messages.append({"role": "user", "content": q})
-    with st.chat_message("user"):
-        st.markdown(q)
-
-    chunks, sources = retrieve(q, vectorizer, tfidf_matrix, metadata)
-
-    with st.chat_message("assistant"):
-        if gpt_enabled:
-            try:
-                ans = ask_gpt(q, chunks, api_key)
-                st.markdown(ans)
-            except Exception as e:
-                st.warning(f"GPT çağrısı başarısız: {e}")
-                st.markdown("İlgili doküman parçalarını aşağıya bırakıyorum:")
-
-        st.markdown("**Kaynak parçalar:**")
-        for (src, pg), ch in zip(sources, chunks):
-            with st.expander(f"{src} | sayfa {pg}"):
-                st.write(ch)
-
-    # assistant mesajı olarak kaydet (gpt yoksa retrieval özetini kaydet)
-    st.session_state.messages.append({"role": "assistant", "content": "Cevap üretildi (aşağıda kaynaklar var)."})
+if __name__ == "__main__":
+    n = build_index()
+    print(f"✅ TF-IDF index oluşturuldu. Toplam chunk: {n}")
