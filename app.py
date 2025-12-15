@@ -104,24 +104,34 @@ def main():
         st.markdown(q)
 
     with st.chat_message("assistant"):
-        try:
-            results = search(q, top_k=5)
-            render_debug(results)
+    try:
+        results = search(q, top_k=5)
+        render_debug(results)
 
-            # skorlar çok düşükse bile top chunkları kullanıyoruz
+        # 🔑 EN ÖNEMLİ KISIM: skor eşiği
+        best = max([r["score"] for r in results], default=0.0)
+
+        if best < 0.05:
+            answer = "Bu dokümanlarda sorunuza doğrudan karşılık gelen net bir madde bulamadım."
+        else:
             answer = ask_gpt(q, results)
 
-            # kaynakları da küçük footer olarak göster
-            sources = []
-            for r in results[:3]:
-                sources.append(f"- {r['source']} (s.{r['page']}) skor={r['score']:.4f}")
-            footer = "\n\n**Kaynaklar (en yakın eşleşmeler):**\n" + "\n".join(sources)
+        # kaynakları footer olarak göster
+        sources = []
+        for r in results[:3]:
+            sources.append(
+                f"- {r['source']} (s.{r['page']}) skor={r['score']:.4f}"
+            )
 
-            st.markdown(answer + footer)
-            st.session_state.messages.append({"role": "assistant", "content": answer + footer})
+        footer = "\n\n**Kaynaklar (en yakın eşleşmeler):**\n" + "\n".join(sources)
 
-        except Exception as e:
-            st.error(f"Hata: {e}")
+        st.markdown(answer + footer)
+        st.session_state.messages.append(
+            {"role": "assistant", "content": answer + footer}
+        )
+
+    except Exception as e:
+        st.error(f"Hata: {e}")
 
 
 if __name__ == "__main__":
